@@ -2,6 +2,8 @@
 import express from 'express';
 import cors from 'cors';
 import fs from 'fs';
+import dotenv from 'dotenv';
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -29,14 +31,16 @@ app.post('/submit-booking', (req, res) => {
 });
 
 app.get('/bookings', (req, res) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || authHeader !== `Bearer ${process.env.ADMIN_PASSWORD}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   try {
     const data = fs.readFileSync(filePath, 'utf-8');
     res.json(JSON.parse(data));
   } catch (err) {
     res.status(500).json({ error: 'Failed to read bookings.' });
   }
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
 });
