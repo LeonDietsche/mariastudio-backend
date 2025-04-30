@@ -1,8 +1,8 @@
- 
 import express from 'express';
 import cors from 'cors';
-import fs from 'fs';
 import dotenv from 'dotenv';
+import { MongoClient, ServerApiVersion } from 'mongodb';
+
 dotenv.config();
 
 const app = express();
@@ -11,26 +11,45 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-const filePath = './bookings.json';
+const uri = process.env.MONGODB_URI;
 
-app.post('/submit-booking', (req, res) => {
-  const bookingData = req.body;
-
-  let current = [];
-  try {
-    const data = fs.readFileSync(filePath, 'utf-8');
-    current = JSON.parse(data || '[]');
-  } catch (err) {
-    console.error('Error reading bookings.json:', err);
+const client = new MongoClient(uri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
   }
-
-  current.push({ ...bookingData, date: new Date().toISOString() });
-  fs.writeFileSync(filePath, JSON.stringify(current, null, 2));
-
-  res.json({ message: 'Booking received' });
 });
 
-app.get('/bookings', (req, res) => {
+let db, bookings;
+
+// Connect once when server starts
+client.connect()
+  .then(() => {
+    db = client.db("mariastudio"); // You can change the DB name if needed
+    bookings = db.collection("bookings");
+    console.log("✅ Connected to MongoDB Atlas");
+  })
+  .catch((err) => {
+    console.error("❌ MongoDB connection failed:", err);
+  });
+
+
+// ✅ POST: Save new booking
+app.post('/submit-booking', async (req, res) => {
+  try {
+    const bookingData = { ...req.body, date: new Date().toISOString() };
+    const result = await bookings.insertOne(bookingData);
+    res.json({ message: 'Booking saved', id: result.insertedId });
+  } catch (err) {
+    console.error('❌ Failed to insert booking:', err);
+    res.status(500).json({ error: 'Failed to save booking' });
+  }
+});
+
+
+// ✅ GET: View all bookings (protected)
+app.get('/bookings', async (req, res) => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || authHeader !== `Bearer ${process.env.ADMIN_PASSWORD}`) {
@@ -38,13 +57,16 @@ app.get('/bookings', (req, res) => {
   }
 
   try {
-    const data = fs.readFileSync(filePath, 'utf-8');
-    res.json(JSON.parse(data));
+    const allBookings = await bookings.find().toArray();
+    res.json(allBookings);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to read bookings.' });
+    console.error('❌ Failed to load bookings:', err);
+    res.status(500).json({ error: 'Failed to fetch bookings' });
   }
 });
 
+
+// ✅ Start the server
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
