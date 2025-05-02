@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import nodemailer from 'nodemailer';
 import { MongoClient, ServerApiVersion } from 'mongodb';
 
 dotenv.config();
@@ -40,9 +41,13 @@ app.post('/submit-booking', async (req, res) => {
   try {
     const bookingData = { ...req.body, date: new Date().toISOString() };
     const result = await bookings.insertOne(bookingData);
+
+    // ✉️ Send email notification
+    await sendBookingNotification(bookingData);
+
     res.json({ message: 'Booking saved', id: result.insertedId });
   } catch (err) {
-    console.error('❌ Failed to insert booking:', err);
+    console.error('❌ Failed to insert booking or send email:', err);
     res.status(500).json({ error: 'Failed to save booking' });
   }
 });
@@ -65,8 +70,35 @@ app.get('/bookings', async (req, res) => {
   }
 });
 
+// ✅ GET: Ping route to wake up Render
+app.get('/ping', (req, res) => {
+  res.status(200).send('pong');
+});
 
 // ✅ Start the server
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
+
+async function sendBookingNotification(data) {
+  const transporter = nodemailer.createTransport({
+    host: process.env.EMAIL_HOST,
+    port: parseInt(process.env.EMAIL_PORT),
+    secure: false,
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+  });
+
+  const formatted = Object.entries(data)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join('\n');
+
+  await transporter.sendMail({
+    from: `"Maria Studio Booking" <${process.env.EMAIL_USER}>`,
+    to: process.env.EMAIL_TO,
+    subject: '📸 New Booking Received',
+    text: `A new booking was submitted:\n\n${formatted}`
+  });
+}
