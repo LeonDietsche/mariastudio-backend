@@ -8,65 +8,71 @@ import { MongoClient, ServerApiVersion } from 'mongodb';
 
 dotenv.config();
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3000;
 
+// CORS + JSON (JSON limit is small now since we use multipart for files)
 app.use(cors());
-// keep JSON for other routes; set a modest limit
 app.use(express.json({ limit: '1mb' }));
 
-// ── Multer: accept one optional PDF (field name must be "general_eqlistfile")
+// Multer (memory) for single optional file upload
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
-  fileFilter: (req, file, cb) => {
-    // allow only PDFs; relax if you want to accept more types
-    if (file.mimetype === 'application/pdf') cb(null, true);
-    else cb(new Error('Only PDF files are allowed.'));
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10 MB; adjust as needed
   }
 });
 
+// Mongo
 const uri = process.env.MONGODB_URI;
 const client = new MongoClient(uri, {
-  serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true }
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  }
 });
 
 let db, bookings;
 
-// connect once on boot
 client.connect()
   .then(() => {
     db = client.db('mariastudio');
     bookings = db.collection('bookings');
     console.log('✅ Connected to MongoDB Atlas');
   })
-  .catch(err => console.error('❌ MongoDB connection failed:', err));
+  .catch((err) => {
+    console.error('❌ MongoDB connection failed:', err);
+  });
 
-// ── POST: save booking (fields + optional file)
+// Health
+app.get('/ping', (_req, res) => res.status(200).send('pong'));
+
+/**
+ * POST /submit-booking
+ * Accepts multipart/form-data with optional file field "general_eqlistfile".
+ * Text fields are in req.body; file (if any) is in req.file.
+ */
 app.post('/submit-booking', upload.single('general_eqlistfile'), async (req, res) => {
   try {
-    // All text inputs (including textarea) arrive as strings on req.body
-    const fields = req.body;
+    const file = req.file || null;
 
-    // Store only metadata about the file (not the binary) in Mongo
-    const fileMeta = req.file
-      ? {
-          originalname: req.file.originalname,
-          mimetype: req.file.mimetype,
-          size: req.file.size
-        }
-      : null;
+    // Store only lightweight file metadata in DB (avoid giant base64 in DB)
+    const fileMeta = file ? {
+      originalname: file.originalname,
+      mimetype:     file.mimetype,
+      size:         file.size
+    } : null;
 
-    const record = {
-      ...fields,
-      uploaded_file: fileMeta,
-      date: new Date().toISOString()
+    const bookingData = {
+      ...req.body,
+      date: new Date().toISOString(),
+      ...(fileMeta ? { file: fileMeta } : {})
     };
 
-    const result = await bookings.insertOne(record);
+    const result = await bookings.insertOne(bookingData);
 
-    // Email notification (with the PDF attached if present)
-    await sendBookingNotification(record, req.file);
+    await sendBookingNotification(bookingData, file);
 
     res.json({ message: 'Booking saved', id: result.insertedId });
   } catch (err) {
@@ -75,7 +81,10 @@ app.post('/submit-booking', upload.single('general_eqlistfile'), async (req, res
   }
 });
 
-// ── GET: all bookings (protected)
+/**
+ * GET /bookings
+ * Bearer-protected simple listing
+ */
 app.get('/bookings', async (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || authHeader !== `Bearer ${process.env.ADMIN_PASSWORD}`) {
@@ -91,45 +100,45 @@ app.get('/bookings', async (req, res) => {
   }
 });
 
-// ── Ping route
-app.get('/ping', (req, res) => res.status(200).send('pong'));
-
-// ── Multer error handler (nice 400s instead of 500s)
-app.use((err, req, res, next) => {
-  if (err && err.name === 'MulterError') {
-    return res.status(400).json({ error: err.message });
-  }
-  if (err && err.message === 'Only PDF files are allowed.') {
-    return res.status(400).json({ error: err.message });
-  }
-  next(err);
-});
-
-// ── Start
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
 
-// ── Email helper (attaches file if present)
+/* ---------------------------
+   Email helper (with optional attachment)
+--------------------------- */
 async function sendBookingNotification(data, file) {
   const transporter = nodemailer.createTransport({
     host: process.env.EMAIL_HOST,
-    port: parseInt(process.env.EMAIL_PORT, 10),
-    secure: false,
-    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+    port: parseInt(process.env.EMAIL_PORT || '587', 10),
+    secure: String(process.env.EMAIL_SECURE || 'false') === 'true',
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
   });
 
+  // Flatten key/value text body
   const formatted = Object.entries(data)
     .map(([k, v]) => `${k}: ${v}`)
     .join('\n');
 
-  await transporter.sendMail({
+  const mailOptions = {
     from: `"Maria Studio Booking" <${process.env.EMAIL_USER}>`,
     to: process.env.EMAIL_TO,
     subject: '📸 New Booking Received',
     text: `A new booking was submitted:\n\n${formatted}`,
-    attachments: file
-      ? [{ filename: file.originalname, content: file.buffer, contentType: file.mimetype }]
-      : []
-  });
+    attachments: []
+  };
+
+  // Attach uploaded file if present
+  if (file) {
+    mailOptions.attachments.push({
+      filename: file.originalname,
+      content: file.buffer,
+      contentType: file.mimetype
+    });
+  }
+
+  await transporter.sendMail(mailOptions);
 }
